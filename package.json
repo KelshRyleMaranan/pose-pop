@@ -1,0 +1,15 @@
+{
+  "name": "pose-pop",
+  "version": "1.0.0",
+  "description": "Hand and face tracking webcam app for laptops. Strike a pose and an image pops out.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "Kelsh Ryle Maranan",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "45.3.1"
+  }
+}
