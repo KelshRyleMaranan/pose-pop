@@ -8,8 +8,64 @@
     name="description"
     content="Hand and face tracking webcam app. Strike a pose and an image pops out."
   />
+  <link rel="stylesheet" href="style.css" />
 </head>
-<body style="margin: 0; background: #202020; color: #ffffff; font-family: 'Segoe UI', system-ui, sans-serif; display: grid; place-items: center; height: 100vh;">
-  <p>Pose Pop</p>
+<body>
+  <main class="app">
+    <aside class="rail rail-left">
+      <button
+        id="settingsBtn"
+        class="gear"
+        type="button"
+        aria-label="Settings"
+      >
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+        </svg>
+      </button>
+    </aside>
+
+    <section class="stage" id="stage">
+      <video id="video" autoplay playsinline muted hidden></video>
+      <p class="stage-message" id="status">Camera is off</p>
+    </section>
+
+    <aside class="rail rail-right">
+      <button
+        id="startBtn"
+        class="shutter"
+        type="button"
+        aria-label="Start camera"
+      >
+        <svg
+          width="28"
+          height="28"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" />
+          <circle cx="12" cy="13" r="3.5" />
+        </svg>
+      </button>
+    </aside>
+  </main>
+
+  <script type="module" src="script.js"></script>
 </body>
 </html>
