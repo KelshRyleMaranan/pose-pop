@@ -1,12 +1,15 @@
 import {
   FilesetResolver,
   GestureRecognizer,
+  FaceLandmarker,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 
 const WASM_URL =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 const HAND_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task";
+const FACE_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 
 // How many hands to track at the same time.
 const MAX_HANDS = 2;
@@ -15,7 +18,16 @@ const MAX_HANDS = 2;
 // but may rarely see a "hand" that isn't one. The default is 0.5.
 const HAND_SENSITIVITY = 0.5;
 
-// true  = show a small label with the detected gesture (for testing).
+// How easily the tracker accepts a face (0 to 1). The default is 0.5.
+const FACE_SENSITIVITY = 0.5;
+
+// The face is checked on every Nth video frame. 1 = every frame (smoothest
+// but heaviest). 2 = every second frame (lighter). If the FPS is low on your
+// laptop, try 2 or 3. The hands are always checked on every frame.
+const FACE_EVERY_N_FRAMES = 1;
+
+// true  = show a small label with the detected gesture and face scores
+//         (for testing).
 // false = no label. Temporary, we remove it in the cleanup commit.
 const SHOW_DEBUG_LABEL = true;
 
@@ -26,9 +38,15 @@ const statusEl = document.getElementById("status");
 
 let stream = null;
 let gestureRecognizer = null;
+let faceLandmarker = null;
 let animationId = null;
 let lastVideoTime = -1;
 let lastHandCount = -1;
+let lastFaceFound = null;
+let frameCount = 0;
+let lastFace = { found: false, landmarks: null, blendshapes: {} };
+let handMs = 0;
+let faceMs = 0;
 let fpsFrames = 0;
 let fpsStart = 0;
 
@@ -37,8 +55,9 @@ const debugLabel = document.createElement("p");
 debugLabel.hidden = true;
 debugLabel.style.cssText =
   "position:absolute;top:12px;left:12px;margin:0;padding:4px 10px;" +
-  "border-radius:6px;background:rgba(0,0,0,0.55);color:#fff;" +
-  "font-size:0.85rem;pointer-events:none;";
+  "max-width:calc(100% - 24px);border-radius:6px;" +
+  "background:rgba(0,0,0,0.55);color:#fff;font-size:0.85rem;" +
+  "white-space:pre-wrap;pointer-events:none;";
 stage.appendChild(debugLabel);
 
 function setDebugLabel(text) {
@@ -65,34 +84,74 @@ function friendlyError(error) {
   }
 }
 
-// ---------- Hand tracker ----------
+// ---------- Trackers ----------
 
-async function createGestureRecognizer(vision, delegate) {
-  return GestureRecognizer.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate },
-    runningMode: "VIDEO",
-    numHands: MAX_HANDS,
-    minHandDetectionConfidence: HAND_SENSITIVITY,
-    minHandPresenceConfidence: HAND_SENSITIVITY,
-    minTrackingConfidence: HAND_SENSITIVITY,
-  });
+// Tries the graphics card first, then falls back to the normal processor.
+async function createWithFallback(name, create) {
+  try {
+    const tracker = await create("GPU");
+    console.log(`${name} ready (GPU)`);
+    return tracker;
+  } catch (gpuError) {
+    console.warn(`${name}: GPU not available, using CPU instead.`, gpuError);
+    const tracker = await create("CPU");
+    console.log(`${name} ready (CPU)`);
+    return tracker;
+  }
 }
 
-async function loadHandTracker() {
+async function loadTrackers() {
   try {
     const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-    try {
-      gestureRecognizer = await createGestureRecognizer(vision, "GPU");
-      console.log("Gesture recognizer ready (GPU)");
-    } catch (gpuError) {
-      console.warn("GPU not available, using CPU instead.", gpuError);
-      gestureRecognizer = await createGestureRecognizer(vision, "CPU");
-      console.log("Gesture recognizer ready (CPU)");
-    }
+
+    gestureRecognizer = await createWithFallback("Gesture recognizer", (delegate) =>
+      GestureRecognizer.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate },
+        runningMode: "VIDEO",
+        numHands: MAX_HANDS,
+        minHandDetectionConfidence: HAND_SENSITIVITY,
+        minHandPresenceConfidence: HAND_SENSITIVITY,
+        minTrackingConfidence: HAND_SENSITIVITY,
+      })
+    );
     startTracking();
+
+    faceLandmarker = await createWithFallback("Face landmarker", (delegate) =>
+      FaceLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: FACE_MODEL_URL, delegate },
+        runningMode: "VIDEO",
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+        minFaceDetectionConfidence: FACE_SENSITIVITY,
+        minFacePresenceConfidence: FACE_SENSITIVITY,
+        minTrackingConfidence: FACE_SENSITIVITY,
+      })
+    );
   } catch (error) {
-    console.error("Hand tracker failed to load:", error);
+    console.error("Tracker failed to load:", error);
   }
+}
+
+// Turns the face result into: found, the face points, and a simple
+// { blendshapeName: score } list (scores are 0 to 1).
+// "Left" and "Right" mean the person's own left and right.
+function readFace(result) {
+  if (!result.faceLandmarks.length) {
+    return { found: false, landmarks: null, blendshapes: {} };
+  }
+
+  const blendshapes = {};
+  const categories =
+    (result.faceBlendshapes[0] && result.faceBlendshapes[0].categories) || [];
+  categories.forEach((c) => {
+    blendshapes[c.categoryName] = Math.round(c.score * 100) / 100;
+  });
+
+  return { found: true, landmarks: result.faceLandmarks[0], blendshapes };
+}
+
+function score(value) {
+  return (value || 0).toFixed(2);
 }
 
 function trackLoop() {
@@ -103,35 +162,59 @@ function trackLoop() {
 
   if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
-    const result = gestureRecognizer.recognizeForVideo(
-      video,
-      performance.now()
-    );
+    frameCount++;
+
+    // Hands: every frame.
+    const handStart = performance.now();
+    const handResult = gestureRecognizer.recognizeForVideo(video, handStart);
+    handMs = handMs * 0.9 + (performance.now() - handStart) * 0.1;
 
     // One entry per hand: the best gesture guess and how sure it is.
-    const gestures = result.landmarks.map((_, i) => {
-      const top = result.gestures[i] && result.gestures[i][0];
+    const gestures = handResult.landmarks.map((_, i) => {
+      const top = handResult.gestures[i] && handResult.gestures[i][0];
       return {
         name: top ? top.categoryName : "None",
-        score: top ? Math.round(top.score * 100) / 100 : 0,
+        score: Math.round((top ? top.score : 0) * 100) / 100,
       };
     });
 
-    // Debug helpers for the Console. We remove them in a later commit.
-    window.latestHands = result.landmarks;
-    window.latestGestures = gestures;
-
-    const count = gestures.length;
-    if (count !== lastHandCount) {
-      lastHandCount = count;
-      console.log("Hands found:", count);
+    // Face: every Nth frame. In between, the last result is reused.
+    if (faceLandmarker && frameCount % FACE_EVERY_N_FRAMES === 0) {
+      const faceStart = performance.now();
+      const faceResult = faceLandmarker.detectForVideo(video, faceStart);
+      faceMs = faceMs * 0.9 + (performance.now() - faceStart) * 0.1;
+      lastFace = readFace(faceResult);
     }
 
-    setDebugLabel(
-      count
-        ? gestures.map((g) => `${g.name} ${g.score}`).join("   |   ")
-        : "No hand"
-    );
+    // Debug helpers for the Console. We remove them in a later commit.
+    window.latestHands = handResult.landmarks;
+    window.latestGestures = gestures;
+    window.latestFace = lastFace.landmarks;
+    window.latestBlendshapes = lastFace.blendshapes;
+    window.latestHandMs = Math.round(handMs);
+    window.latestFaceMs = Math.round(faceMs);
+
+    if (gestures.length !== lastHandCount) {
+      lastHandCount = gestures.length;
+      console.log("Hands found:", gestures.length);
+    }
+    if (lastFace.found !== lastFaceFound) {
+      lastFaceFound = lastFace.found;
+      console.log("Face found:", lastFace.found);
+    }
+
+    const handLine = gestures.length
+      ? gestures.map((g) => `${g.name} ${g.score}`).join("   |   ")
+      : "No hand";
+
+    const b = lastFace.blendshapes;
+    const smile = ((b.mouthSmileLeft || 0) + (b.mouthSmileRight || 0)) / 2;
+    const faceLine = lastFace.found
+      ? `smile ${score(smile)}  jaw ${score(b.jawOpen)}  brows ${score(b.browInnerUp)}  ` +
+        `tongue ${score(b.tongueOut)}  blinkL ${score(b.eyeBlinkLeft)}  blinkR ${score(b.eyeBlinkRight)}`
+      : "No face";
+
+    setDebugLabel(`${handLine}\n${faceLine}`);
 
     // Debug helper: frames per second, updated once a second.
     fpsFrames++;
@@ -150,6 +233,9 @@ function startTracking() {
   if (animationId !== null || !stream || !gestureRecognizer) return;
   lastVideoTime = -1;
   lastHandCount = -1;
+  lastFaceFound = null;
+  frameCount = 0;
+  lastFace = { found: false, landmarks: null, blendshapes: {} };
   fpsFrames = 0;
   fpsStart = performance.now();
   animationId = requestAnimationFrame(trackLoop);
@@ -160,8 +246,13 @@ function stopTracking() {
     cancelAnimationFrame(animationId);
     animationId = null;
   }
+  lastFace = { found: false, landmarks: null, blendshapes: {} };
   window.latestHands = [];
   window.latestGestures = [];
+  window.latestFace = null;
+  window.latestBlendshapes = {};
+  window.latestHandMs = 0;
+  window.latestFaceMs = 0;
   window.latestFps = 0;
   debugLabel.hidden = true;
 }
@@ -223,5 +314,5 @@ startBtn.addEventListener("click", () => {
 
 // ---------- Start ----------
 
-loadHandTracker();
+loadTrackers();
 console.log("Pose Pop loaded");
