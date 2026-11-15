@@ -3,6 +3,19 @@ import {
   GestureRecognizer,
   FaceLandmarker,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
+import {
+  POSES,
+  HOLD_SECONDS,
+  GRACE_SECONDS,
+  SHOW_WHILE_HELD,
+  SHOW_SECONDS,
+  COOLDOWN_SECONDS,
+  POP_IN_MS,
+  POP_OUT_MS,
+  POP_SIZE_PERCENT,
+} from "./poses.js";
+import { createPoseEngine } from "./pose-engine.js";
+import { createPopper } from "./pop.js";
 
 const WASM_URL =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
@@ -26,13 +39,14 @@ const FACE_SENSITIVITY = 0.5;
 // laptop, try 2 or 3. The hands are always checked on every frame.
 const FACE_EVERY_N_FRAMES = 1;
 
-// true  = show a small label with the detected gesture and face scores
+// true  = show a small label with the detected gesture, face scores and pose
 //         (for testing).
 // false = no label. Temporary, we remove it in the cleanup commit.
 const SHOW_DEBUG_LABEL = true;
 
 const stage = document.getElementById("stage");
 const video = document.getElementById("video");
+const popImage = document.getElementById("popImage");
 const startBtn = document.getElementById("startBtn");
 const statusEl = document.getElementById("status");
 
@@ -49,6 +63,33 @@ let handMs = 0;
 let faceMs = 0;
 let fpsFrames = 0;
 let fpsStart = 0;
+
+// Shows and hides the pop-out picture.
+const popper = createPopper({
+  img: popImage,
+  showWhileHeld: SHOW_WHILE_HELD,
+  showSeconds: SHOW_SECONDS,
+  cooldownSeconds: COOLDOWN_SECONDS,
+  popInMs: POP_IN_MS,
+  popOutMs: POP_OUT_MS,
+  sizePercent: POP_SIZE_PERCENT,
+});
+popper.preload(POSES);
+
+// Counts how long a pose is held, then pops the picture.
+const poseEngine = createPoseEngine({
+  poses: POSES,
+  holdSeconds: HOLD_SECONDS,
+  graceSeconds: GRACE_SECONDS,
+  onStart: (pose) => {
+    console.log("Pose started:", pose.name);
+    popper.show(pose);
+  },
+  onEnd: (pose) => {
+    console.log("Pose ended:", pose.name);
+    if (SHOW_WHILE_HELD) popper.hide();
+  },
+});
 
 // Temporary label for testing (see SHOW_DEBUG_LABEL).
 const debugLabel = document.createElement("p");
@@ -144,7 +185,7 @@ function readFace(result) {
   const categories =
     (result.faceBlendshapes[0] && result.faceBlendshapes[0].categories) || [];
   categories.forEach((c) => {
-    blendshapes[c.categoryName] = Math.round(c.score * 100) / 100;
+    blendshapes[c.categoryName] = Math.round(c.score * 1000) / 1000;
   });
 
   return { found: true, landmarks: result.faceLandmarks[0], blendshapes };
@@ -186,11 +227,28 @@ function trackLoop() {
       lastFace = readFace(faceResult);
     }
 
+    // Everything the pose rules can look at, in one place.
+    const state = {
+      hands: handResult.landmarks.map((landmarks, i) => ({
+        gesture: gestures[i].name,
+        score: gestures[i].score,
+        landmarks,
+      })),
+      face: lastFace,
+    };
+
+    // A pose can only trigger when no picture is showing or cooling down.
+    const poseNow = performance.now();
+    const blocked = popper.isBusy(poseNow);
+    const pose = poseEngine.update(state, poseNow, !blocked);
+
     // Debug helpers for the Console. We remove them in a later commit.
     window.latestHands = handResult.landmarks;
     window.latestGestures = gestures;
     window.latestFace = lastFace.landmarks;
     window.latestBlendshapes = lastFace.blendshapes;
+    window.latestPose = pose;
+    window.latestPopBusy = blocked;
     window.latestHandMs = Math.round(handMs);
     window.latestFaceMs = Math.round(faceMs);
 
@@ -214,7 +272,16 @@ function trackLoop() {
         `tongue ${score(b.tongueOut)}  blinkL ${score(b.eyeBlinkLeft)}  blinkR ${score(b.eyeBlinkRight)}`
       : "No face";
 
-    setDebugLabel(`${handLine}\n${faceLine}`);
+    let poseLine = "Pose: -";
+    if (pose.active) {
+      poseLine = `Pose: ${pose.active} (triggered)`;
+    } else if (pose.candidate) {
+      poseLine =
+        `Pose: ${pose.candidate} ${Math.round(pose.progress * 100)}%` +
+        (blocked && pose.progress >= 1 ? " (waiting)" : "");
+    }
+
+    setDebugLabel(`${handLine}\n${faceLine}\n${poseLine}`);
 
     // Debug helper: frames per second, updated once a second.
     fpsFrames++;
@@ -236,6 +303,8 @@ function startTracking() {
   lastFaceFound = null;
   frameCount = 0;
   lastFace = { found: false, landmarks: null, blendshapes: {} };
+  poseEngine.reset();
+  popper.reset();
   fpsFrames = 0;
   fpsStart = performance.now();
   animationId = requestAnimationFrame(trackLoop);
@@ -247,10 +316,14 @@ function stopTracking() {
     animationId = null;
   }
   lastFace = { found: false, landmarks: null, blendshapes: {} };
+  poseEngine.reset();
+  popper.reset();
   window.latestHands = [];
   window.latestGestures = [];
   window.latestFace = null;
   window.latestBlendshapes = {};
+  window.latestPose = null;
+  window.latestPopBusy = false;
   window.latestHandMs = 0;
   window.latestFaceMs = 0;
   window.latestFps = 0;
